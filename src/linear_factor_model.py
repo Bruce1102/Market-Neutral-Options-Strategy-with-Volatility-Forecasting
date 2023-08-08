@@ -1,40 +1,5 @@
 import numpy as np
 from scipy.optimize import minimize
-
-# def objective_function(params, target, factors):
-#     """
-#     Objective function to compute the mean squared error between the 
-#     predicted SPX values using the linear factor model and the actual SPX values.
-#     """
-#     # Create an array with the first column as ones (for the intercept) and the subsequent columns as factors
-#     target_factors = np.column_stack([np.ones(factors.shape[0]), factors])
-
-#     # Predict the target using the linear factor model
-#     predicted_target = np.dot(target_factors, params)
-    
-#     # Compute the mean squared error
-#     mse = np.mean((predicted_target - target) ** 2)
-#     return mse
-
-# def fit_LFM(obj_function, target, factors):
-
-#     initial_params = np.zeros(factors.shape[1]+1)
-
-#     return minimize(obj_function, initial_params, args=(target, factors)).x
-
-# def predict_LFM(factors, params):
-#     """
-#     Predict values using the linear factor model.
-#     """
-#     # Create an array with the first column as ones (for the intercept) and the subsequent columns as factors
-#     prediction_factors = np.column_stack([np.ones(factors.shape[0]), factors])
-
-#     # Predict the target using the linear factor model
-#     return np.dot(prediction_factors, params)
-
-
-import numpy as np
-from scipy.optimize import minimize
 from typing import List, Union
 
 class LinearFactorModel:
@@ -97,25 +62,31 @@ class LinearFactorModel:
         Predict values using the trained Linear Factor Model.
 
         Parameters:
-        - factors (numpy.ndarray) : Factor matrix.
+        - factors (numpy.ndarray) : Factor matrix. Can be 2D or 3D for batched input.
 
         Returns:
-        - np.ndarray: Predicted values.
+        - np.ndarray: Predicted values. 2D or 3D depending on input.
         """
         # Ensure the model is trained
         if self.params is None:
             raise ValueError("Model is not yet trained. Use the 'fit' method first.")
 
+        # Check if the input is batched (3D)
+        if len(factors.shape) == 3:
+            batched = True
+            batch_size, num_samples, num_factors = factors.shape
+            factors = factors.reshape(-1, num_factors)
+        else:
+            batched = False
+
         # Create an array with the first column as ones (for the intercept) and the subsequent columns as factors
         prediction_factors = np.column_stack([np.ones(factors.shape[0]), factors])
 
         # Predict the target using the linear factor model
-        return np.dot(prediction_factors, self.params)
-# Simulate interest rates for a given number of days using the CIR Jump model.
+        predictions = np.dot(prediction_factors, self.params)
 
-# Parameters:
-# - n_days (int): Number of days to simulate.
+        # Reshape the predictions back to 3D if the input was batched
+        if batched:
+            predictions = predictions.reshape(batch_size, num_samples)
 
-# Returns:
-# - numpy.array: Simulated interest rates.
-# """
+        return predictions

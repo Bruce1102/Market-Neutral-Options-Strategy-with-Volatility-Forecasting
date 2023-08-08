@@ -3,8 +3,8 @@ from scipy.optimize import minimize
 
 
 class JDMSimulator:
-    def __init__(self, initial_price: float=1, drift: float=0, volatility: float=0, lambda_jump: float=0, jump_mean: float=0, 
-                 jump_std: float=1, p: float=None, eta1: float=None, eta2: float=None, model: str="merton", 
+    def __init__(self, initial_price: float=1, drift: float=0.001, volatility: float=0.5, lambda_jump: float=0, jump_mean: float=0.1, 
+                 jump_std: float=0.5, p: float=0.5, eta1: float=0.03, eta2: float=0.03, model: str="kou", 
                  dt: float=1/252) -> None:
         """
         Initialize the Jump Diffusion Model Simulator.
@@ -86,8 +86,9 @@ class JDMSimulator:
 
     def estimate_parameters(self, prices):
         """Estimate model parameters and update the instance's parameters."""
-        init_params = [0.0001, 0.01, 0.01, 0, 0.01, 0.5, 0.03, 0.03]
-        bounds = [(None, None), (0.0001, 2), (0, 1), (None, None), (0, 1), (0, 1), (0, 1), (0, 1)]
+        init_params = [self.drift, self.volatility, self.lambda_jump, self.jump_mean, self.jump_std, self.p, self.eta1, self.eta2]
+
+        bounds = [(None, None), (0.0001, 2), (0, None), (None, None), (0, 1), (0, 1), (0, 1), (0, 1)]
         result = minimize(self.negative_log_likelihood, init_params, args=(prices, self.model), bounds=bounds)
         
         # Update the instance's parameters
@@ -114,7 +115,7 @@ class CIRJumpModel:
     - dt (float): Time step for simulation.
     """
     
-    def __init__(self, initial_rate: float=0.01, a: float=0.1, b: float=0.05, sigma: float=0.01, lambda_jump: float=0.1, 
+    def __init__(self, initial_rate: float=0.01, a: float=0.1, b: float=0.05, sigma: float=0.1, lambda_jump: float=0.1, 
                  jump_mean: float=0, jump_std: float=0.01, dt: float=1/252) -> None:
         """
         Initialize the CIRJumpModel with given parameters.
@@ -195,7 +196,7 @@ class CIRJumpModel:
             likelihoods.append(np.log(likelihood))
         return -sum(likelihoods)
 
-    def estimate_parameters(self, rates: float)-> list:
+    def estimate_parameters(self, rates: list)-> list:
         """
         Estimate model parameters from observed interest rates using maximum likelihood estimation.
         
@@ -203,7 +204,7 @@ class CIRJumpModel:
         - np.array: Estimated model parameters (a, b, sigma).
         """
         initial_params = [self.a, self.b, self.sigma]
-        bounds = [(0, None), (0, None), (0, None)]
+        bounds = [(0, None), (0, None), (0.000000000000000001, None)]
         result = minimize(self.negative_log_likelihood, initial_params, args=(rates), bounds=bounds)
         self.a, self.b, self.sigma = result.x
         self.initial_rate = rates[0]
