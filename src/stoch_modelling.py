@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.optimize import minimize
+from scipy.stats import norm, poisson
 
 
 class JDMSimulator:
@@ -58,7 +59,7 @@ class JDMSimulator:
         for _ in range(n_days):
             drift_term = self.drift * prices[-1] * self.dt
             shock_term = self.volatility * prices[-1] * np.sqrt(self.dt) * np.random.normal()
-            jump = self._jump_term()
+            jump = self._jump_term()*prices[-1]
             
             next_price = prices[-1] + drift_term + shock_term + jump
             prices.append(next_price)
@@ -74,27 +75,61 @@ class JDMSimulator:
                 jump = self.eta1 * np.random.exponential() if np.random.rand() < self.p else -self.eta2 * np.random.exponential()
         return jump
 
-    @staticmethod
-    def negative_log_likelihood(params, prices, model):
-        """Negative log likelihood function for parameter estimation."""
-        drift, volatility, lambda_jump, jump_mean, jump_std, p, eta1, eta2 = params
-        simulator = JDMSimulator(prices[0], drift, volatility, lambda_jump, jump_mean, jump_std, p, eta1, eta2, model)
-        simulated_prices = simulator.simulate(len(prices) - 1, prices[0])
-        log_returns = np.log(simulated_prices[1:] / simulated_prices[:-1])
-        log_returns_real = np.log(prices[1:] / prices[:-1])
-        return np.sum((log_returns - log_returns_real)**2)
 
-    def estimate_parameters(self, prices):
-        """Estimate model parameters and update the instance's parameters."""
-        init_params = [self.drift, self.volatility, self.lambda_jump, self.jump_mean, self.jump_std, self.p, self.eta1, self.eta2]
+    def _drift_diffusion_pdf(self, R: np.array, mu: float, sigma: float, dt: float) -> float:
+        """Compute the pdf of the drift-diffusion component of the model"""
+        return norm.pdf(R, (mu - 0.5 * sigma**2) * dt, sigma * np.sqrt(dt))
+    
 
-        bounds = [(None, None), (0.0001, 2), (0, None), (None, None), (0, 1), (0, 1), (0, 1), (0, 1)]
-        result = minimize(self.negative_log_likelihood, init_params, args=(prices, self.model), bounds=bounds)
+    def _jump_pdf(self, R: np.array, lambda_jump: float, jump_mean: float, jump_std: float,
+                  p: float, eta1: float, eta2: float, dt: float, max_jumps: int=11) -> np.array:
+        """Compute the pdf of the jump component of the model"""
         
-        # Update the instance's parameters
-        self.initial_price = prices[0]
+        if self.model == 'merton':
+            # Computing pdf of jump
+            poisson_probs = np.array([poisson.pmf(k, lambda_jump * dt) for k in range(max_jumps)])
+            # Computing pdf of size of jump
+            normal_pdfs = np.array([norm.pdf(R, k * jump_mean * dt, np.sqrt(k * jump_std**2 * dt)) for k in range(max_jumps)])
+            
+            # Compute the weighted sum of the Normal PDFs
+            return np.sum(poisson_probs[:, np.newaxis] * normal_pdfs, axis=0)
+
+        elif self.model == 'kou':
+            # Double exponential distribution for the jump sizes
+            jump_size = p * eta1 * np.exp(-eta1 * R) * (R > 0) + (1-p) * eta2 * np.exp(eta2 * R) * (R < 0)
+            # Compute the weighed sum of the poisson pdf
+            combined_pdf = np.sum([poisson.pmf(k, lambda_jump * dt)*jump_size for k in range(max_jumps)], axis=0)
+
+            return combined_pdf
+
+    def _neg_log_likelihood(self, params, R, dt):
+        """Negative log-likelihood function for the Jump model."""
+        mu, sigma, lambda_jump, jump_mean, jump_std, p, eta1, eta2,  = params
+   
+        # Computing likelihood for drift-diffusion and jump component
+        dd_pdf   = self._drift_diffusion_pdf(R, mu, sigma, dt)
+        jump_pdf = self._jump_pdf(R, lambda_jump, jump_mean, jump_std, p, eta1, eta2, dt)
+        
+        # Combining them together
+        combined_pdf = dd_pdf * jump_pdf
+        return -np.sum(np.log(combined_pdf))
+
+    def estimate_parameters(self, x):
+        """Estimate parameters using MLE and update the model parameters."""
+        # computing log returns
+        R = np.diff(np.log(x))
+
+        # Initial testing parameters
+        params0 = [self.drift, self.volatility, self.lambda_jump, 
+                   self.jump_mean, self.jump_std, self.p, self.eta1, self.eta2]
+        # Setting boundaries
+        bounds = [(None, None), (0.001, None), (0, 1), (None, None), (0.001, None), (0, 1), (0, None), (0, None)]
+
+        # Numerically solving MLE
+        result = minimize(self._neg_log_likelihood, params0, args=(R, self.dt), bounds=bounds)
+        
+        self.initial_price = x[0]
         self.drift, self.volatility, self.lambda_jump, self.jump_mean, self.jump_std, self.p, self.eta1, self.eta2 = result.x
-        
         return result.x
 
 
@@ -106,37 +141,33 @@ class CIRJumpModel:
     
     Attributes:
     - r (array-like): Historical interest rate data.
-    - a (float): Speed of mean reversion.
-    - b (float): Long-term mean level of the interest rate.
+    - k (float): Speed of mean reversion.
+    - theta (float): Long-term mean level of the interest rate.
     - sigma (float): Volatility of the interest rate.
     - lambda_jump (float): Intensity of the jump process.
     - jump_mean (float): Mean of the jump size.
     - jump_std (float): Standard deviation of the jump size.
-    - dt (float): Time step for simulation.
+    - p: Probability for positive jump in Kou model.
+    - eta1, eta2: Parameters for the exponential distribution in Kou model.
+    - model: Type of model ("merton" or "kou").
+    - dt (float, optional): Time step for simulation. Defaults to 1/252 (assuming 252 trading days in a year).
     """
     
-    def __init__(self, initial_rate: float=0.01, a: float=0.1, b: float=0.05, sigma: float=0.1, lambda_jump: float=0.1, 
-                 jump_mean: float=0, jump_std: float=0.01, dt: float=1/252) -> None:
-        """
-        Initialize the CIRJumpModel with given parameters.
-        
-        Parameters:
-        - initial_rate (float, optional): initial interest rate.
-        - a (float, optional): Speed of mean reversion. Defaults to 0.1.
-        - b (float, optional): Long-term mean level of the interest rate. Defaults to 0.05.
-        - sigma (float, optional): Volatility of the interest rate. Defaults to 0.01.
-        - lambda_jump (float, optional): Intensity of the jump process. Defaults to 0.1.
-        - jump_mean (float, optional): Mean of the jump size. Defaults to 0.
-        - jump_std (float, optional): Standard deviation of the jump size. Defaults to 0.01.
-        - dt (float, optional): Time step for simulation. Defaults to 1/252 (assuming 252 trading days in a year).
-        """
+    def __init__(self, initial_rate: float=0.01, k: float=0.1, theta: float=0.05, sigma: float=0.1, lambda_jump: float=0, jump_mean: float=0.1, 
+                 jump_std: float=0.5, p: float=0.5, eta1: float=0.03, eta2: float=0.03, model: str="kou", dt: float=1/252) -> None:
+        """ Initialize the CIRJumpModel with given parameters."""
+
         self.initial_rate = initial_rate
-        self.a = a
-        self.b = b
+        self.k = k
+        self.thetat = theta
         self.sigma = sigma
         self.lambda_jump = lambda_jump
         self.jump_mean = jump_mean
         self.jump_std = jump_std
+        self.p = p
+        self.eta1 = eta1
+        self.eta2 = eta2
+        self.model = model
         self.dt = dt
 
     def simulate(self, n_days: int, initial_rate: float = None) -> np.array:
@@ -185,12 +216,12 @@ class CIRJumpModel:
         Returns:
         - float: Negative log likelihood value.
         """
-        a, b, sigma = params
+        k, theta, sigma = params
         dt = 1/252
         n = len(rates)
         likelihoods = []
         for t in range(1, n):
-            mu = a * (b - rates[t-1]) * dt
+            mu = k * (theta - rates[t-1]) * dt
             sigma_t = sigma * np.sqrt(rates[t-1] * dt)
             likelihood = (1 / (sigma_t * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((rates[t] - rates[t-1] - mu) / sigma_t)**2)
             likelihoods.append(np.log(likelihood))
@@ -203,10 +234,10 @@ class CIRJumpModel:
         Returns:
         - np.array: Estimated model parameters (a, b, sigma).
         """
-        initial_params = [self.a, self.b, self.sigma]
+        initial_params = [self.k, self.theta, self.sigma]
         bounds = [(0, None), (0, None), (0.000000000000000001, None)]
         result = minimize(self.negative_log_likelihood, initial_params, args=(rates), bounds=bounds)
-        self.a, self.b, self.sigma = result.x
+        self.k, self.theta, self.sigma = result.x
         self.initial_rate = rates[0]
         return result.x
 
@@ -215,7 +246,7 @@ class CorrelatedJDMSimulator:
     """
     A class to simulate stock prices using a correlated jump diffusion model.
     """
-    def __init__(self, initial_prices: float=1, drifts: float=0, volatilities: float=0, lambda_jumps: float=0, 
+    def __init__(self, initial_prices: float=1, drifts: float=1, volatilities: float=0, lambda_jumps: float=0, 
                  jump_means: float=0, jump_stds: float=0, correlation_matrix: np.ndarray=np.ones((1,1)), dt: float=1/252) -> None:
         """
         Initialize the simulator with model parameters.
@@ -331,3 +362,26 @@ class CorrelatedJDMSimulator:
         return estimated_params
     
 
+"""
+EXAMPLE USE:
+
+from stoch_modelling import CIRJumpModel
+
+#S = time series dataset of asset S
+#n_days = number of days to simulate
+
+
+# Initialise CIR Jump model:
+cirjump_model = CIRJumpModel()
+
+
+# Fitting model with MLE:
+cirjump_model.fit(S)
+
+# Run simulations:
+# Setting initial_rate is optional, by default it will be set to S[0]
+sim_results = simulate(n_days, initial_rate = S[-1])
+
+
+
+"""
